@@ -1,0 +1,16 @@
+{
+  "name": "translate-phone",
+  "version": "1.0.0",
+  "description": "Hebrew-English translation phone line",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "@vitalets/google-translate-api": "^9.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
