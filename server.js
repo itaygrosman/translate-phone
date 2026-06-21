@@ -4,48 +4,72 @@ const { translate } = require('@vitalets/google-translate-api');
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 
-const HE_VOICE = 'Polly.Carmit';
-const EN_VOICE = 'Polly.Joanna';
+const BASE_URL = process.env.BASE_URL || 'https://translate-phone.onrender.com';
+const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_NUMBER = process.env.TWILIO_NUMBER;
 
-function escapeXml(text) {
-  return String(text)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+// Twilio's built-in <Say> does NOT support Hebrew. Instead we generate speech
+// audio via Google Translate TTS (proxied through our own /tts endpoint so
+// Twilio fetches from us, not Google directly) and play it with <Play>.
+// lang: 'iw' = Hebrew, 'en' = English.
+function speak(text, lang) {
+  const t = String(text || '').trim().slice(0, 190); // Google TTS length cap
+  if (!t) return '';
+  return `<Play>${BASE_URL}/tts?lang=${lang}&amp;text=${encodeURIComponent(t)}</Play>`;
 }
+const heb = (text) => speak(text, 'iw');
+
+// TTS proxy: fetch the MP3 from Google and stream it back to Twilio.
+app.get('/tts', async (req, res) => {
+  const text = (req.query.text || '').toString().slice(0, 200);
+  const lang = (req.query.lang || 'iw').toString();
+  if (!text) return res.status(400).end();
+  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text)}&tl=${lang}&client=tw-ob`;
+  try {
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Referer': 'https://translate.google.com/'
+      }
+    });
+    if (!r.ok) {
+      console.error('TTS upstream error:', r.status);
+      return res.status(502).end();
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.set('Content-Type', 'audio/mpeg');
+    res.send(buf);
+  } catch (e) {
+    console.error('TTS error:', e.message);
+    res.status(502).end();
+  }
+});
 
 function spellEnglish(word) {
-  const letters = word.toLowerCase().replace(/[^a-z]/g, '').split('');
-  return letters.join(' ');
+  return word.toLowerCase().replace(/[^a-z]/g, '').split('').join(' ');
 }
 
 function spellHebrew(word) {
-  const letters = word.replace(/[^\u0590-\u05FF]/g, '').split('');
-  return letters.join(' ');
+  return word.replace(/[^֐-׿]/g, '').split('').join(' ');
 }
 
 function buildTranslationSay(translation, toLang) {
   const isSingleWord = !translation.trim().includes(' ');
-  const targetLangCode = toLang === 'en' ? 'en-US' : 'he-IL';
-  const targetVoice = toLang === 'en' ? EN_VOICE : HE_VOICE;
+  const targetTts = toLang === 'en' ? 'en' : 'iw';
 
-  let block = `<Say voice="${targetVoice}">${escapeXml(translation)}</Say>`;
+  let block = speak(translation, targetTts);
 
   if (isSingleWord) {
     if (toLang === 'en') {
       const spelled = spellEnglish(translation);
       if (spelled.length > 0) {
-        block += `<Pause length="1"/>` +
-                 `<Say voice="${HE_VOICE}">איות:</Say>` +
-                 `<Say voice="${EN_VOICE}">${escapeXml(spelled)}</Say>`;
+        block += `<Pause length="1"/>` + heb('איות:') + speak(spelled, 'en');
       }
     } else {
       const spelled = spellHebrew(translation);
       if (spelled.length > 0) {
-        block += `<Pause length="1"/>` +
-                 `<Say voice="${HE_VOICE}">איות: ${escapeXml(spelled)}</Say>`;
+        block += `<Pause length="1"/>` + heb('איות: ' + spelled);
       }
     }
   }
@@ -57,13 +81,9 @@ function postTranslateMenu(dir, translation) {
   const encoded = encodeURIComponent(translation);
   return `
     <Gather numDigits="1" action="/post-translate?dir=${dir}&amp;t=${encoded}" method="POST" timeout="10">
-      <Say voice="${HE_VOICE}">
-        לשמוע שוב את התרגום, הקש 1.
-        למילה או משפט חדש, הקש 2.
-        לתפריט הראשי, הקש 3.
-      </Say>
+      ${heb('לשמוע שוב את התרגום, הקש 1. למילה או משפט חדש, הקש 2. לתפריט הראשי, הקש 3.')}
     </Gather>
-    <Say voice="${HE_VOICE}">לא קיבלתי בחירה. להתראות.</Say>
+    ${heb('לא קיבלתי בחירה. להתראות.')}
   `;
 }
 
@@ -71,13 +91,9 @@ app.post('/voice', (req, res) => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather numDigits="1" action="/direction" method="POST" timeout="10">
-    <Say voice="${HE_VOICE}">
-      ברוך הבא למתרגם הטלפוני.
-      לתרגום מעברית לאנגלית, הקש 1.
-      לתרגום מאנגלית לעברית, הקש 2.
-    </Say>
+    ${heb('ברוך הבא למתרגם הטלפוני. לתרגום מעברית לאנגלית, הקש 1. לתרגום מאנגלית לעברית, הקש 2.')}
   </Gather>
-  <Say voice="${HE_VOICE}">לא קיבלתי בחירה. להתראות.</Say>
+  ${heb('לא קיבלתי בחירה. להתראות.')}
 </Response>`;
   res.type('text/xml').send(twiml);
 });
@@ -92,12 +108,9 @@ app.post('/direction', (req, res) => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather numDigits="1" action="/input-method?dir=${digit}" method="POST" timeout="10">
-    <Say voice="${HE_VOICE}">
-      להגיד את המילה או המשפט בקול, הקש 1.
-      לאיית את האותיות, הקש 2.
-    </Say>
+    ${heb('להגיד את המילה או המשפט בקול, הקש 1. לאיית את האותיות, הקש 2.')}
   </Gather>
-  <Say voice="${HE_VOICE}">לא קיבלתי בחירה. להתראות.</Say>
+  ${heb('לא קיבלתי בחירה. להתראות.')}
 </Response>`;
   res.type('text/xml').send(twiml);
 });
@@ -118,9 +131,9 @@ app.post('/input-method', (req, res) => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="speech" language="${sourceLang}" speechTimeout="auto" action="/translate?dir=${dir}&amp;mode=${mode}" method="POST" timeout="15">
-    <Say voice="${HE_VOICE}">${prompt}</Say>
+    ${heb(prompt)}
   </Gather>
-  <Say voice="${HE_VOICE}">לא שמעתי. נחזור לתפריט.</Say>
+  ${heb('לא שמעתי. נחזור לתפריט.')}
   <Redirect method="POST">/voice</Redirect>
 </Response>`;
   res.type('text/xml').send(twiml);
@@ -134,7 +147,7 @@ app.post('/translate', async (req, res) => {
   if (!text) {
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${HE_VOICE}">לא קלטתי את הדיבור. נחזור לתפריט.</Say>
+  ${heb('לא קלטתי את הדיבור. נחזור לתפריט.')}
   <Redirect method="POST">/voice</Redirect>
 </Response>`;
     return res.type('text/xml').send(twiml);
@@ -156,7 +169,7 @@ app.post('/translate', async (req, res) => {
     console.error('Translation error:', e.message);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${HE_VOICE}">שגיאה בתרגום. נחזור לתפריט.</Say>
+  ${heb('שגיאה בתרגום. נחזור לתפריט.')}
   <Redirect method="POST">/voice</Redirect>
 </Response>`;
     return res.type('text/xml').send(twiml);
@@ -167,7 +180,10 @@ app.post('/translate', async (req, res) => {
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Pause length="3"/>
+  <Pause length="1"/>
+  ${heb('שמעתי:')}
+  ${speak(text, dir === '1' ? 'iw' : 'en')}
+  <Pause length="1"/>
   ${sayBlock}
   <Pause length="1"/>
   ${menu}
@@ -197,12 +213,9 @@ app.post('/post-translate', (req, res) => {
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather numDigits="1" action="/input-method?dir=${dir}" method="POST" timeout="10">
-    <Say voice="${HE_VOICE}">
-      להגיד את המילה או המשפט בקול, הקש 1.
-      לאיית את האותיות, הקש 2.
-    </Say>
+    ${heb('להגיד את המילה או המשפט בקול, הקש 1. לאיית את האותיות, הקש 2.')}
   </Gather>
-  <Say voice="${HE_VOICE}">להתראות.</Say>
+  ${heb('להתראות.')}
 </Response>`;
     return res.type('text/xml').send(twiml);
   }
@@ -227,11 +240,6 @@ app.post('/post-translate', (req, res) => {
 // answered international call. We reject the incoming call (no answer = no
 // charge to the caller) and immediately call them back, which connects them
 // to the translation menu. The callback leg is billed to the Twilio account.
-const BASE_URL = process.env.BASE_URL || 'https://translate-phone.onrender.com';
-const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_NUMBER = process.env.TWILIO_NUMBER;
-
 app.post('/incoming', async (req, res) => {
   const caller = (req.body.From || '').trim();
 
@@ -258,7 +266,6 @@ app.post('/incoming', async (req, res) => {
     console.error('Missing caller or Twilio credentials; cannot place callback.');
   }
 
-  // Reject the incoming call without answering it (caller is not charged).
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response><Reject reason="busy"/></Response>`;
   res.type('text/xml').send(twiml);
