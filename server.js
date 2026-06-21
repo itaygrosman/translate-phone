@@ -31,21 +31,21 @@ function buildTranslationSay(translation, toLang) {
   const targetLangCode = toLang === 'en' ? 'en-US' : 'he-IL';
   const targetVoice = toLang === 'en' ? EN_VOICE : HE_VOICE;
 
-  let block = `<Say language="${targetLangCode}" voice="${targetVoice}">${escapeXml(translation)}</Say>`;
+  let block = `<Say voice="${targetVoice}">${escapeXml(translation)}</Say>`;
 
   if (isSingleWord) {
     if (toLang === 'en') {
       const spelled = spellEnglish(translation);
       if (spelled.length > 0) {
         block += `<Pause length="1"/>` +
-                 `<Say language="he-IL" voice="${HE_VOICE}">איות:</Say>` +
-                 `<Say language="en-US" voice="${EN_VOICE}">${escapeXml(spelled)}</Say>`;
+                 `<Say voice="${HE_VOICE}">איות:</Say>` +
+                 `<Say voice="${EN_VOICE}">${escapeXml(spelled)}</Say>`;
       }
     } else {
       const spelled = spellHebrew(translation);
       if (spelled.length > 0) {
         block += `<Pause length="1"/>` +
-                 `<Say language="he-IL" voice="${HE_VOICE}">איות: ${escapeXml(spelled)}</Say>`;
+                 `<Say voice="${HE_VOICE}">איות: ${escapeXml(spelled)}</Say>`;
       }
     }
   }
@@ -57,13 +57,13 @@ function postTranslateMenu(dir, translation) {
   const encoded = encodeURIComponent(translation);
   return `
     <Gather numDigits="1" action="/post-translate?dir=${dir}&amp;t=${encoded}" method="POST" timeout="10">
-      <Say language="he-IL" voice="${HE_VOICE}">
+      <Say voice="${HE_VOICE}">
         לשמוע שוב את התרגום, הקש 1.
         למילה או משפט חדש, הקש 2.
         לתפריט הראשי, הקש 3.
       </Say>
     </Gather>
-    <Say language="he-IL" voice="${HE_VOICE}">לא קיבלתי בחירה. להתראות.</Say>
+    <Say voice="${HE_VOICE}">לא קיבלתי בחירה. להתראות.</Say>
   `;
 }
 
@@ -71,13 +71,13 @@ app.post('/voice', (req, res) => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather numDigits="1" action="/direction" method="POST" timeout="10">
-    <Say language="he-IL" voice="${HE_VOICE}">
+    <Say voice="${HE_VOICE}">
       ברוך הבא למתרגם הטלפוני.
       לתרגום מעברית לאנגלית, הקש 1.
       לתרגום מאנגלית לעברית, הקש 2.
     </Say>
   </Gather>
-  <Say language="he-IL" voice="${HE_VOICE}">לא קיבלתי בחירה. להתראות.</Say>
+  <Say voice="${HE_VOICE}">לא קיבלתי בחירה. להתראות.</Say>
 </Response>`;
   res.type('text/xml').send(twiml);
 });
@@ -92,12 +92,12 @@ app.post('/direction', (req, res) => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather numDigits="1" action="/input-method?dir=${digit}" method="POST" timeout="10">
-    <Say language="he-IL" voice="${HE_VOICE}">
+    <Say voice="${HE_VOICE}">
       להגיד את המילה או המשפט בקול, הקש 1.
       לאיית את האותיות, הקש 2.
     </Say>
   </Gather>
-  <Say language="he-IL" voice="${HE_VOICE}">לא קיבלתי בחירה. להתראות.</Say>
+  <Say voice="${HE_VOICE}">לא קיבלתי בחירה. להתראות.</Say>
 </Response>`;
   res.type('text/xml').send(twiml);
 });
@@ -118,9 +118,9 @@ app.post('/input-method', (req, res) => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="speech" language="${sourceLang}" speechTimeout="auto" action="/translate?dir=${dir}&amp;mode=${mode}" method="POST" timeout="15">
-    <Say language="he-IL" voice="${HE_VOICE}">${prompt}</Say>
+    <Say voice="${HE_VOICE}">${prompt}</Say>
   </Gather>
-  <Say language="he-IL" voice="${HE_VOICE}">לא שמעתי. נחזור לתפריט.</Say>
+  <Say voice="${HE_VOICE}">לא שמעתי. נחזור לתפריט.</Say>
   <Redirect method="POST">/voice</Redirect>
 </Response>`;
   res.type('text/xml').send(twiml);
@@ -134,7 +134,7 @@ app.post('/translate', async (req, res) => {
   if (!text) {
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say language="he-IL" voice="${HE_VOICE}">לא קלטתי את הדיבור. נחזור לתפריט.</Say>
+  <Say voice="${HE_VOICE}">לא קלטתי את הדיבור. נחזור לתפריט.</Say>
   <Redirect method="POST">/voice</Redirect>
 </Response>`;
     return res.type('text/xml').send(twiml);
@@ -156,7 +156,7 @@ app.post('/translate', async (req, res) => {
     console.error('Translation error:', e.message);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say language="he-IL" voice="${HE_VOICE}">שגיאה בתרגום. נחזור לתפריט.</Say>
+  <Say voice="${HE_VOICE}">שגיאה בתרגום. נחזור לתפריט.</Say>
   <Redirect method="POST">/voice</Redirect>
 </Response>`;
     return res.type('text/xml').send(twiml);
@@ -197,12 +197,12 @@ app.post('/post-translate', (req, res) => {
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather numDigits="1" action="/input-method?dir=${dir}" method="POST" timeout="10">
-    <Say language="he-IL" voice="${HE_VOICE}">
+    <Say voice="${HE_VOICE}">
       להגיד את המילה או המשפט בקול, הקש 1.
       לאיית את האותיות, הקש 2.
     </Say>
   </Gather>
-  <Say language="he-IL" voice="${HE_VOICE}">להתראות.</Say>
+  <Say voice="${HE_VOICE}">להתראות.</Say>
 </Response>`;
     return res.type('text/xml').send(twiml);
   }
