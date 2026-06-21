@@ -223,8 +223,49 @@ app.post('/post-translate', (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
+// Callback flow: caller dials a (US) number to avoid being charged for an
+// answered international call. We reject the incoming call (no answer = no
+// charge to the caller) and immediately call them back, which connects them
+// to the translation menu. The callback leg is billed to the Twilio account.
+const BASE_URL = process.env.BASE_URL || 'https://translate-phone.onrender.com';
+const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_NUMBER = process.env.TWILIO_NUMBER;
+
+app.post('/incoming', async (req, res) => {
+  const caller = (req.body.From || '').trim();
+
+  if (caller && TWILIO_SID && TWILIO_TOKEN && TWILIO_NUMBER) {
+    const params = new URLSearchParams();
+    params.append('To', caller);
+    params.append('From', TWILIO_NUMBER);
+    params.append('Url', `${BASE_URL}/voice`);
+    const auth = Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64');
+    try {
+      const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: params.toString()
+      });
+      if (!r.ok) console.error('Callback create failed:', r.status, await r.text());
+    } catch (e) {
+      console.error('Callback error:', e.message);
+    }
+  } else {
+    console.error('Missing caller or Twilio credentials; cannot place callback.');
+  }
+
+  // Reject the incoming call without answering it (caller is not charged).
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response><Reject reason="busy"/></Response>`;
+  res.type('text/xml').send(twiml);
+});
+
 app.get('/', (req, res) => {
-  res.send('Translate Phone is running. Configure Twilio webhook to POST to /voice');
+  res.send('Translate Phone is running. Configure Twilio webhook to POST to /voice (or /incoming for callback mode)');
 });
 
 app.post('/voice-get', (req, res) => res.redirect(307, '/voice'));
