@@ -108,8 +108,8 @@ app.post('/voice', (req, res) => {
 app.post('/direction', (req, res) => {
   const digit = req.body.Digits;
   if (digit !== '1' && digit !== '2') {
-    res.set('Location', '/voice');
-    return res.status(307).end();
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Redirect method="POST">/voice</Redirect></Response>`);
   }
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -125,12 +125,13 @@ app.post('/input-method', (req, res) => {
   const dir = req.query.dir;
   const digit = req.body.Digits;
   if (digit !== '1' && digit !== '2') {
-    res.set('Location', '/voice');
-    return res.status(307).end();
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Redirect method="POST">/voice</Redirect></Response>`);
   }
   const mode = digit === '1' ? 'speak' : 'spell';
-  res.set('Location', `/listen?dir=${dir}&mode=${mode}&try=0`);
-  return res.status(307).end();
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response><Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=0</Redirect></Response>`;
+  res.type('text/xml').send(twiml);
 });
 
 // Speech-capture step with retry. Falls through to a retry (up to MAX) instead
@@ -233,8 +234,14 @@ app.post('/post-translate', (req, res) => {
   }
 
   if (digit === '2') {
-    res.set('Location', `/input-method?dir=${dir}`);
-    return res.status(307).end();
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather numDigits="1" action="/input-method?dir=${dir}" method="POST" timeout="10">
+    ${heb('להגיד את המילה או המשפט בקול, הקש 1. לאיית את האותיות, הקש 2.')}
+  </Gather>
+  <Redirect method="POST">/voice</Redirect>
+</Response>`;
+    return res.type('text/xml').send(twiml);
   }
 
   if (digit === '3') {
