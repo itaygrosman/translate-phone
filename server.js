@@ -157,7 +157,7 @@ app.post('/listen', (req, res) => {
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" language="${sourceLang}" speechTimeout="auto" action="/translate?dir=${dir}&amp;mode=${mode}&amp;try=${tryN}" method="POST" timeout="15">
+  <Gather input="speech" language="${sourceLang}" speechModel="googlev2" speechTimeout="auto" action="/translate?dir=${dir}&amp;mode=${mode}&amp;try=${tryN}" method="POST" timeout="15">
     ${heb(promptText)}
   </Gather>
   <Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=${tryN + 1}</Redirect>
@@ -170,6 +170,7 @@ app.post('/translate', async (req, res) => {
   const mode = req.query.mode;
   const tryN = parseInt(req.query.try || '0', 10);
   const text = (req.body.SpeechResult || '').trim();
+  console.log('STT result:', JSON.stringify({ dir, mode, tryN, text, confidence: req.body.Confidence }));
 
   // No speech captured -> ask again (retry) rather than going to the menu.
   if (!text) {
