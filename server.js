@@ -157,7 +157,7 @@ app.post('/listen', (req, res) => {
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" language="${sourceLang}" speechModel="googlev2" speechTimeout="auto" action="/translate?dir=${dir}&amp;mode=${mode}&amp;try=${tryN}" method="POST" timeout="15">
+  <Gather input="speech" language="${sourceLang}" speechModel="phone_call" enhanced="true" speechTimeout="auto" action="/translate?dir=${dir}&amp;mode=${mode}&amp;try=${tryN}" method="POST" timeout="15">
     ${heb(promptText)}
   </Gather>
   <Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=${tryN + 1}</Redirect>
@@ -182,7 +182,9 @@ app.post('/translate', async (req, res) => {
   }
 
   let processedText = text;
-  if (mode === 'spell') processedText = text.replace(/\s+/g, '');
+  // Spelling: STT returns letters with spaces/periods ("F r. I e n d. S.") —
+  // keep only actual letters (English or Hebrew) and join them into the word.
+  if (mode === 'spell') processedText = text.replace(/[^A-Za-z֐-׿]/g, '');
 
   const fromLang = dir === '1' ? 'he' : 'en';
   const toLang = dir === '1' ? 'en' : 'he';
