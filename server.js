@@ -3,10 +3,11 @@ const express = require('express');
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 
-const BASE_URL = process.env.BASE_URL || 'https://translate-phone.onrender.com';
+const BASE_URL = process.env.BASE_URL || 'https://dev.hananelhub.com';
 const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_NUMBER = process.env.TWILIO_NUMBER;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MAX_LISTEN_TRIES = 3;
 
 // Twilio's built-in <Say> does NOT support Hebrew. We generate speech audio via
@@ -61,6 +62,57 @@ async function translateText(text, from, to) {
   }
 }
 
+// Download a Twilio call recording (needs Twilio basic auth). Retries because the
+// recording may take a moment to become available after the call ends.
+async function downloadRecording(recordingUrl) {
+  if (!recordingUrl) return null;
+  const auth = Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64');
+  const url = recordingUrl.endsWith('.wav') ? recordingUrl : recordingUrl + '.wav';
+  for (let i = 0; i < 6; i++) {
+    try {
+      const r = await fetch(url, { headers: { 'Authorization': `Basic ${auth}` } });
+      if (r.ok) {
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (buf.length > 1000) return buf;
+      }
+    } catch (e) { /* retry */ }
+    await new Promise(res => setTimeout(res, 800));
+  }
+  return null;
+}
+
+// Transcribe audio with OpenAI Whisper (excellent Hebrew support).
+async function whisperTranscribe(audioBuffer, langHint) {
+  if (!OPENAI_API_KEY) { console.error('No OPENAI_API_KEY'); return ''; }
+  try {
+    const form = new FormData();
+    form.append('file', new Blob([audioBuffer], { type: 'audio/wav' }), 'audio.wav');
+    form.append('model', 'whisper-1');
+    if (langHint) form.append('language', langHint);
+    const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+      body: form
+    });
+    if (!r.ok) { console.error('Whisper error:', r.status, (await r.text()).slice(0, 200)); return ''; }
+    const data = await r.json();
+    return (data.text || '').trim();
+  } catch (e) {
+    console.error('Whisper exception:', e.message);
+    return '';
+  }
+}
+
+// Best-effort delete of the recording after we transcribed it (privacy/cleanup).
+async function deleteRecording(sid) {
+  if (!sid || !TWILIO_SID || !TWILIO_TOKEN) return;
+  const auth = Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64');
+  try {
+    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Recordings/${sid}.json`,
+      { method: 'DELETE', headers: { 'Authorization': `Basic ${auth}` } });
+  } catch (e) { /* ignore */ }
+}
+
 function spellEnglish(word) {
   return word.toLowerCase().replace(/[^a-z]/g, '').split('').join(' ');
 }
@@ -92,6 +144,38 @@ function postTranslateMenu(dir, translation) {
     </Gather>
     <Redirect method="POST">/post-translate?dir=${dir}&amp;t=${encoded}&amp;reprompt=1</Redirect>
   `;
+}
+
+// Shared: translate the recognized text and respond with the spoken result + menu.
+async function respondWithTranslation(res, text, dir, mode) {
+  let processedText = text;
+  if (mode === 'spell') processedText = text.replace(/[^A-Za-z֐-׿]/g, '');
+
+  const fromLang = dir === '1' ? 'he' : 'en';
+  const toLang = dir === '1' ? 'en' : 'he';
+
+  let translation;
+  try {
+    translation = await translateText(processedText, fromLang, toLang);
+  } catch (e) {
+    console.error('Translation error:', e.message);
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>${heb('הייתה בעיה בתרגום, ננסה שוב.')}<Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=0</Redirect></Response>`);
+  }
+
+  const sayBlock = buildTranslationSay(translation, toLang);
+  const menu = postTranslateMenu(dir, translation);
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Pause length="1"/>
+  ${heb('שמעתי:')}
+  ${speak(text, dir === '1' ? 'iw' : 'en')}
+  <Pause length="1"/>
+  ${sayBlock}
+  <Pause length="1"/>
+  ${menu}
+</Response>`;
+  res.type('text/xml').send(twiml);
 }
 
 app.post('/voice', (req, res) => {
@@ -129,93 +213,57 @@ app.post('/input-method', (req, res) => {
 <Response><Redirect method="POST">/voice</Redirect></Response>`);
   }
   const mode = digit === '1' ? 'speak' : 'spell';
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response><Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=0</Redirect></Response>`;
-  res.type('text/xml').send(twiml);
+  res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=0</Redirect></Response>`);
 });
 
-// Speech-capture step with retry. Falls through to a retry (up to MAX) instead
-// of dumping the caller back to the main menu.
+// Record the caller's speech (we transcribe with Whisper, not Twilio's weak
+// built-in recognition — especially important for Hebrew).
 app.post('/listen', (req, res) => {
   const dir = req.query.dir;
   const mode = req.query.mode;
   const tryN = parseInt(req.query.try || '0', 10);
 
   if (tryN >= MAX_LISTEN_TRIES) {
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${heb('לא הצלחתי לשמוע. נחזור לתפריט.')}
-  <Redirect method="POST">/voice</Redirect>
-</Response>`;
-    return res.type('text/xml').send(twiml);
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>${heb('לא הצלחתי לשמוע. נחזור לתפריט.')}<Redirect method="POST">/voice</Redirect></Response>`);
   }
 
-  const sourceLang = dir === '1' ? 'he-IL' : 'en-US';
   const promptText = tryN > 0
-    ? (mode === 'speak' ? 'לא שמעתי, נסה שוב. דבר עכשיו.' : 'לא שמעתי, נסה שוב. אייית את האותיות עכשיו.')
-    : (mode === 'speak' ? 'דבר עכשיו.' : 'אייית את האותיות עכשיו, אות אחר אות.');
+    ? (mode === 'speak' ? 'לא שמעתי, נסה שוב. דבר אחרי הצפצוף, ובסיום המתן שנייה.' : 'לא שמעתי, נסה שוב. אייית את האותיות אחרי הצפצוף.')
+    : (mode === 'speak' ? 'דבר אחרי הצפצוף, ובסיום המתן שנייה.' : 'אייית את האותיות אחרי הצפצוף.');
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" language="${sourceLang}" speechModel="phone_call" enhanced="true" speechTimeout="auto" action="/translate?dir=${dir}&amp;mode=${mode}&amp;try=${tryN}" method="POST" timeout="15">
-    ${heb(promptText)}
-  </Gather>
+  ${heb(promptText)}
+  <Record action="/transcribe?dir=${dir}&amp;mode=${mode}&amp;try=${tryN}" method="POST" maxLength="25" timeout="3" playBeep="true" finishOnKey="#" trim="trim-silence" />
   <Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=${tryN + 1}</Redirect>
 </Response>`;
   res.type('text/xml').send(twiml);
 });
 
-app.post('/translate', async (req, res) => {
+app.post('/transcribe', async (req, res) => {
   const dir = req.query.dir;
   const mode = req.query.mode;
   const tryN = parseInt(req.query.try || '0', 10);
-  const text = (req.body.SpeechResult || '').trim();
-  console.log('STT result:', JSON.stringify({ dir, mode, tryN, text, confidence: req.body.Confidence }));
+  const recordingUrl = req.body.RecordingUrl;
+  const recordingSid = req.body.RecordingSid;
 
-  // No speech captured -> ask again (retry) rather than going to the menu.
+  let text = '';
+  const audio = await downloadRecording(recordingUrl);
+  if (audio) {
+    const langHint = dir === '1' ? 'he' : 'en';
+    text = await whisperTranscribe(audio, langHint);
+  }
+  deleteRecording(recordingSid); // fire-and-forget cleanup
+  console.log('Whisper result:', JSON.stringify({ dir, mode, tryN, text }));
+
   if (!text) {
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=${tryN + 1}</Redirect>
-</Response>`;
-    return res.type('text/xml').send(twiml);
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=${tryN + 1}</Redirect></Response>`);
   }
 
-  let processedText = text;
-  // Spelling: STT returns letters with spaces/periods ("F r. I e n d. S.") —
-  // keep only actual letters (English or Hebrew) and join them into the word.
-  if (mode === 'spell') processedText = text.replace(/[^A-Za-z֐-׿]/g, '');
-
-  const fromLang = dir === '1' ? 'he' : 'en';
-  const toLang = dir === '1' ? 'en' : 'he';
-
-  let translation;
-  try {
-    translation = await translateText(processedText, fromLang, toLang);
-  } catch (e) {
-    console.error('Translation error:', e.message);
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${heb('הייתה בעיה בתרגום, ננסה שוב.')}
-  <Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=${tryN + 1}</Redirect>
-</Response>`;
-    return res.type('text/xml').send(twiml);
-  }
-
-  const sayBlock = buildTranslationSay(translation, toLang);
-  const menu = postTranslateMenu(dir, translation);
-
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Pause length="1"/>
-  ${heb('שמעתי:')}
-  ${speak(text, dir === '1' ? 'iw' : 'en')}
-  <Pause length="1"/>
-  ${sayBlock}
-  <Pause length="1"/>
-  ${menu}
-</Response>`;
-  res.type('text/xml').send(twiml);
+  return respondWithTranslation(res, text, dir, mode);
 });
 
 app.post('/post-translate', (req, res) => {
@@ -227,41 +275,34 @@ app.post('/post-translate', (req, res) => {
   if (digit === '1') {
     const sayBlock = buildTranslationSay(translation, toLang);
     const menu = postTranslateMenu(dir, translation);
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   ${sayBlock}
   <Pause length="1"/>
   ${menu}
-</Response>`;
-    return res.type('text/xml').send(twiml);
+</Response>`);
   }
 
   if (digit === '2') {
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather numDigits="1" action="/input-method?dir=${dir}" method="POST" timeout="10">
     ${heb('להגיד את המילה או המשפט בקול, הקש 1. לאיית את האותיות, הקש 2.')}
   </Gather>
   <Redirect method="POST">/voice</Redirect>
-</Response>`;
-    return res.type('text/xml').send(twiml);
+</Response>`);
   }
 
   if (digit === '3') {
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Redirect method="POST">/voice</Redirect>
-</Response>`;
-    return res.type('text/xml').send(twiml);
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Redirect method="POST">/voice</Redirect></Response>`);
   }
 
-  // No / invalid input: re-offer the menu once more.
   const menu = postTranslateMenu(dir, translation);
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+  res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   ${menu}
-</Response>`;
-  res.type('text/xml').send(twiml);
+</Response>`);
 });
 
 // Callback flow: caller dials a (US) number; we reject the inbound call (no
@@ -287,9 +328,8 @@ app.post('/incoming', async (req, res) => {
   } else {
     console.error('Missing caller or Twilio credentials; cannot place callback.');
   }
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response><Reject reason="busy"/></Response>`;
-  res.type('text/xml').send(twiml);
+  res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Reject reason="busy"/></Response>`);
 });
 
 app.get('/', (req, res) => {
