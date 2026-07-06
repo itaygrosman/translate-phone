@@ -229,17 +229,44 @@ app.post('/listen', (req, res) => {
 <Response>${heb('לא הצלחתי לשמוע. נחזור לתפריט.')}<Redirect method="POST">/voice</Redirect></Response>`);
   }
 
-  const promptText = tryN > 0
-    ? (mode === 'speak' ? 'לא שמעתי, נסה שוב. דבר אחרי הצפצוף, ובסיום המתן שנייה.' : 'לא שמעתי, נסה שוב. אייית את האותיות אחרי הצפצוף.')
-    : (mode === 'speak' ? 'דבר אחרי הצפצוף, ובסיום המתן שנייה.' : 'אייית את האותיות אחרי הצפצוף.');
+  // English source (dir=2): Twilio's built-in speech recognition works well.
+  if (dir === '2') {
+    const promptText = tryN > 0
+      ? (mode === 'speak' ? 'לא שמעתי, נסה שוב. דבר עכשיו.' : 'לא שמעתי, נסה שוב. אייית את האותיות עכשיו.')
+      : (mode === 'speak' ? 'דבר עכשיו.' : 'אייית את האותיות עכשיו, אות אחר אות.');
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech" language="en-US" speechModel="phone_call" enhanced="true" speechTimeout="auto" action="/translate?dir=${dir}&amp;mode=${mode}&amp;try=${tryN}" method="POST" timeout="15">
+    ${heb(promptText)}
+  </Gather>
+  <Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=${tryN + 1}</Redirect>
+</Response>`);
+  }
 
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+  // Hebrew source (dir=1): record and transcribe with Whisper (Twilio can't do
+  // Hebrew). Generous silence timeout so we capture the whole phrase.
+  const promptText = tryN > 0
+    ? (mode === 'speak' ? 'לא שמעתי, נסה שוב. אחרי הצפצוף אמור את המשפט.' : 'לא שמעתי, נסה שוב. אחרי הצפצוף אייית את האותיות.')
+    : (mode === 'speak' ? 'אחרי הצפצוף אמור את המילה או המשפט, ובסיום הקש סולמית.' : 'אחרי הצפצוף אייית את האותיות, ובסיום הקש סולמית.');
+  return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   ${heb(promptText)}
-  <Record action="/transcribe?dir=${dir}&amp;mode=${mode}&amp;try=${tryN}" method="POST" maxLength="25" timeout="3" playBeep="true" finishOnKey="#" trim="trim-silence" />
+  <Record action="/transcribe?dir=${dir}&amp;mode=${mode}&amp;try=${tryN}" method="POST" maxLength="25" timeout="5" playBeep="true" finishOnKey="#" />
   <Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=${tryN + 1}</Redirect>
-</Response>`;
-  res.type('text/xml').send(twiml);
+</Response>`);
+});
+
+app.post('/translate', async (req, res) => {
+  const dir = req.query.dir;
+  const mode = req.query.mode;
+  const tryN = parseInt(req.query.try || '0', 10);
+  const text = (req.body.SpeechResult || '').trim();
+  console.log('STT(Twilio) result:', JSON.stringify({ dir, mode, tryN, text, confidence: req.body.Confidence }));
+  if (!text) {
+    return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Redirect method="POST">/listen?dir=${dir}&amp;mode=${mode}&amp;try=${tryN + 1}</Redirect></Response>`);
+  }
+  return respondWithTranslation(res, text, dir, mode);
 });
 
 app.post('/transcribe', async (req, res) => {
