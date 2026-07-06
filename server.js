@@ -283,7 +283,7 @@ app.post('/transcribe', async (req, res) => {
     text = await whisperTranscribe(audio, langHint);
   }
   deleteRecording(recordingSid); // fire-and-forget cleanup
-  console.log('Whisper result:', JSON.stringify({ dir, mode, tryN, text }));
+  console.log('Whisper result:', JSON.stringify({ dir, mode, tryN, text, recSec: req.body.RecordingDuration, bytes: audio ? audio.length : 0 }));
 
   if (!text) {
     return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
